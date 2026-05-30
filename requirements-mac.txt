@@ -9,6 +9,9 @@ scikit-learn
 scipy
 tqdm
 cleanlab>=2.7.0
+onnx
+onnxscript
+onnxruntime
 kaggle
 jupyterlab
 ipykernel

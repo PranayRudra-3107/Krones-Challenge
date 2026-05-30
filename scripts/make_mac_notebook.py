@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 
 
@@ -207,6 +208,57 @@ USE_GRAD_CHECKPOINT = True
 """,
     )
     text = text.replace("NUM_WORKERS    = 4", "NUM_WORKERS    = 0          # safer inside local Jupyter on macOS")
+    official_label_rules = """LABEL_CORRECTION_ENABLED = True
+
+# Official COCO target rules from the competition brief.
+ALWAYS_FAULTY_CATS = {
+    'Break / Crack',
+    'Circlip',
+    'Contamination dark',
+    'Crown cap',
+    'Foil / Semitransparent',
+    'Foreign object - manual cleaning',
+    'Foreign object - washing machine',
+    'Glass shard',
+    'Insect',
+    'Label',
+    'Liquid',
+    'Mold',
+    'No base visible',
+    'Paint residue',
+    'Straw',
+    'Yeast residue',
+}
+CONDITIONAL_THRESHOLDS = {
+    'Air bubble': 500,
+    'Chip': 200,
+    'Contamination light': 180,
+    'Glass imperfection': 100,
+    'Scuffing': 75000,
+    'Scuffing heavy': 1200,
+}
+ALWAYS_GOOD_CATS = {
+    'Embossing',
+    'Foam residue',
+    'No fault',
+    'Water drop',
+    'ROI',
+    'Roi',
+    'roi',
+    'Region of interest',
+    'background',
+    'Background',
+}
+"""
+    text, n_rules = re.subn(
+        r"LABEL_CORRECTION_ENABLED = True\n\n.*?(?=\n\nprint\(f'\\nMaxViT config)",
+        official_label_rules,
+        text,
+        count=1,
+        flags=re.S,
+    )
+    if n_rules != 1:
+        raise RuntimeError("Could not patch official COCO label rules in config cell")
     set_cell_source(config_cell, text.rstrip())
 
     for cell in nb["cells"]:
@@ -217,11 +269,33 @@ USE_GRAD_CHECKPOINT = True
             "for cand in [Path('/kaggle/input/bottletypes/bottletypes.csv')]:",
             "for cand in [PROJECT_ROOT / 'data' / 'bottletypes' / 'bottletypes.csv']:",
         )
+        text = text.replace(
+            "labels_orig = pd.read_csv(DATA / 'train.csv')",
+            """FINAL_TRAIN_CSV = PROJECT_ROOT / 'outputs' / 'preprocessing' / 'final_train.csv'
+if FINAL_TRAIN_CSV.exists():
+    labels_orig = pd.read_csv(FINAL_TRAIN_CSV)
+    print(f'Using COCO-derived training labels: {FINAL_TRAIN_CSV}')
+else:
+    labels_orig = pd.read_csv(DATA / 'train.csv')
+    print('COCO final_train.csv not found yet; this notebook will derive corrected labels from annotations.')""",
+        )
         text = text.replace("os.walk('/kaggle/input')", "os.walk(PROJECT_ROOT / 'outputs')")
         text = text.replace("torch.cuda.amp.autocast(enabled=True)", "amp_autocast()")
         text = text.replace("torch.cuda.amp.autocast(enabled=False)", "amp_autocast(enabled=False)")
         text = text.replace("torch.cuda.amp.GradScaler()", "make_grad_scaler()")
         text = text.replace("torch.cuda.empty_cache()", "empty_device_cache()")
+        text = text.replace(
+            """def empty_device_cache():
+    if torch.cuda.is_available():
+        empty_device_cache()
+    elif hasattr(torch, 'mps') and hasattr(torch.mps, 'empty_cache'):
+        torch.mps.empty_cache()""",
+            """def empty_device_cache():
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    elif hasattr(torch, 'mps') and hasattr(torch.mps, 'empty_cache'):
+        torch.mps.empty_cache()""",
+        )
         text = text.replace("pin_memory=True", "pin_memory=PIN_MEMORY")
         set_cell_source(cell, text.rstrip())
 

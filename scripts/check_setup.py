@@ -44,6 +44,9 @@ def main() -> int:
         import cv2
         import sklearn
         import cleanlab
+        import onnx
+        import onnxscript
+        import onnxruntime
         import kaggle
 
         print(f"torch: {torch.__version__}")
@@ -52,6 +55,9 @@ def main() -> int:
         print(f"opencv: {cv2.__version__}")
         print(f"sklearn: {sklearn.__version__}")
         print(f"cleanlab: {cleanlab.__version__}")
+        print(f"onnx: {onnx.__version__}")
+        print(f"onnxscript: {onnxscript.__version__}")
+        print(f"onnxruntime: {onnxruntime.__version__}")
         print("kaggle package: installed")
         print(f"cuda available: {torch.cuda.is_available()}")
         print(

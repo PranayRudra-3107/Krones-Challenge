@@ -1,0 +1,22 @@
+{
+  "jobs": [
+    {
+      "name": "ConvNeXt Small P2 all folds",
+      "model": "v26_convnext_small",
+      "phase": "p2",
+      "folds": [0, 1, 2, 3, 4],
+      "ref": "pranayrudra3107/krones-v26-convnext-small-p2-f0-1-2-3-4",
+      "output_dir": "outputs/kaggle_runs/pranayrudra3107_v26_convnext_small_p2_all",
+      "notes": "P2 all folds resuming from pranayrudra3107/krones-v26-convnext-small-p1-f0-1-2-3-4."
+    },
+    {
+      "name": "MaxViT Tiny P2 all folds",
+      "model": "v26_maxvit",
+      "phase": "p2",
+      "folds": [0, 1, 2, 3, 4],
+      "ref": "pranayrudra3107/krones-v26-maxvit-p2-f0-1-2-3-4",
+      "output_dir": "outputs/kaggle_runs/pranayrudra3107_v26_maxvit_p2_all",
+      "notes": "P2 all folds resuming from pranayrudra3107/krones-v26-maxvit-p1-f0-1-2-3-4."
+    }
+  ]
+}
