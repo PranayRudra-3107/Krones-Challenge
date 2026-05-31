@@ -1,0 +1,194 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+STAMP="$(date +"%Y%m%d_%H%M%S")"
+OUT="$ROOT/chat_handoff/$STAMP"
+LATEST="$ROOT/chat_handoff/latest"
+
+mkdir -p "$OUT/artifacts" "$OUT/project" "$OUT/status"
+
+copy_if_exists() {
+  local src="$1"
+  local dst_dir="$2"
+  if [[ -e "$ROOT/$src" ]]; then
+    mkdir -p "$dst_dir/$(dirname "$src")"
+    cp -R "$ROOT/$src" "$dst_dir/$src"
+  fi
+}
+
+redact_tokens_in_text_files() {
+  local dir="$1"
+  find "$dir" -type f \( -name "*.md" -o -name "*.txt" -o -name "*.json" -o -name "*.py" -o -name "*.ipynb" \) -print0 |
+    while IFS= read -r -d '' file; do
+      perl -pi -e 's/KGAT_[A-Za-z0-9]+/[REDACTED_KAGGLE_TOKEN]/g' "$file"
+    done
+}
+
+cat > "$OUT/CHAT_CONTEXT.md" <<EOF
+# Krones Challenge Handoff
+
+Generated: $(date)
+
+Project root:
+
+\`\`\`text
+$ROOT
+\`\`\`
+
+## Current Goal
+
+The current goal shifted from public leaderboard chasing to preparing the final
+submission package. The chosen final strategy is:
+
+- preprocess labels from COCO annotations, not directly from \`train.csv\`;
+- use ROI cropping from COCO boxes;
+- include bottle-type metadata as a second ONNX input;
+- use ConvNeXt Small + MaxViT Tiny as teacher models;
+- train EfficientNetV2-S as the final single student model;
+- apply robust noisy-label weighting when teacher ensemble strongly disagrees
+  with the COCO-derived label;
+- export EfficientNetV2-S to ONNX for final evaluation.
+
+## Final Model State
+
+The final EfficientNetV2-S student has already been trained locally and exported.
+
+\`\`\`text
+best validation F1: 0.9636056881176187
+best epoch: 5
+threshold: 0.4050000000000002
+train rows: 31807
+valid rows: 3535
+\`\`\`
+
+Important detail: PyTorch exported the ONNX model using external data. The file
+\`final_effnetv2_s.onnx.data\` is required and must stay in the same folder as
+\`final_effnetv2_s.onnx\`.
+
+## Final Submission State
+
+The final evaluation notebook was executed successfully and produced a valid CSV.
+
+\`\`\`text
+submission rows: 4418
+columns: image_id,target
+target values: [0, 1]
+positive predictions: 2558
+\`\`\`
+
+Primary final files:
+
+\`\`\`text
+final_submission/final_evaluation.ipynb
+final_submission/model/final_effnetv2_s.onnx
+final_submission/model/final_effnetv2_s.onnx.data
+final_submission/model/model_metadata.json
+final_submission/submission.csv
+\`\`\`
+
+## Verification Commands
+
+Check ONNX loads:
+
+\`\`\`bash
+source .venv/bin/activate
+python - <<'PY'
+import onnxruntime as ort
+s = ort.InferenceSession("final_submission/model/final_effnetv2_s.onnx", providers=["CPUExecutionProvider"])
+print([i.name for i in s.get_inputs()], [o.name for o in s.get_outputs()])
+PY
+\`\`\`
+
+Run final evaluation notebook:
+
+\`\`\`bash
+source .venv/bin/activate
+jupyter nbconvert --execute --to notebook --inplace final_submission/final_evaluation.ipynb --ExecutePreprocessor.timeout=0
+\`\`\`
+
+Validate submission:
+
+\`\`\`bash
+source .venv/bin/activate
+python - <<'PY'
+import pandas as pd
+sub = pd.read_csv("final_submission/submission.csv")
+sample = pd.read_csv("data/sample_submission.csv")
+print(len(sub), len(sample), list(sub.columns), sorted(sub.target.unique()))
+PY
+\`\`\`
+
+## Safety Notes
+
+- Do not store or repeat Kaggle tokens in project files.
+- Do not include the full 21 GB dataset in handoff packets.
+- Keep \`.onnx\` and \`.onnx.data\` together.
+- The final evaluation notebook is the clean final target; development notebooks
+  and scripts are supporting material only.
+EOF
+
+{
+  echo "# Project Status"
+  echo
+  echo "Generated: $(date)"
+  echo
+  echo "## Git Status"
+  echo
+  if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git -C "$ROOT" status --short
+  else
+    echo "Not a git repository"
+  fi
+  echo
+  echo "## Important Artifacts"
+  echo
+  ls -lh \
+    "$ROOT/final_submission/model/final_effnetv2_s.onnx" \
+    "$ROOT/final_submission/model/final_effnetv2_s.onnx.data" \
+    "$ROOT/final_submission/model/model_metadata.json" \
+    "$ROOT/final_submission/submission.csv" \
+    "$ROOT/outputs/final_effnetv2_s/final_student_summary.json" \
+    2>/dev/null || true
+  echo
+  echo "## Diff Stat"
+  echo
+  if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git -C "$ROOT" diff --stat || true
+  fi
+} > "$OUT/status/PROJECT_STATUS.md"
+
+copy_if_exists "README.md" "$OUT/project"
+copy_if_exists "configs/final_strategy.json" "$OUT/project"
+copy_if_exists "final_submission/README.md" "$OUT/project"
+copy_if_exists "final_submission/final_evaluation.ipynb" "$OUT/project"
+copy_if_exists "final_submission/model/model_metadata.json" "$OUT/project"
+copy_if_exists "outputs/final_effnetv2_s/final_student_summary.json" "$OUT/project"
+copy_if_exists "outputs/final_effnetv2_s/teacher_soft_summary.json" "$OUT/project"
+copy_if_exists "outputs/preprocessing/preprocessing_summary.json" "$OUT/project"
+
+copy_if_exists "final_submission/submission.csv" "$OUT/artifacts"
+copy_if_exists "final_submission/model/final_effnetv2_s.onnx" "$OUT/artifacts"
+copy_if_exists "final_submission/model/final_effnetv2_s.onnx.data" "$OUT/artifacts"
+copy_if_exists "final_submission/model/model_metadata.json" "$OUT/artifacts"
+
+{
+  echo "# Artifact Manifest"
+  echo
+  find "$OUT" -type f -maxdepth 5 | sort | while read -r file; do
+    rel="${file#$OUT/}"
+    size="$(du -h "$file" | awk '{print $1}')"
+    echo "- $rel ($size)"
+  done
+} > "$OUT/MANIFEST.md"
+
+redact_tokens_in_text_files "$OUT"
+
+rm -f "$LATEST"
+ln -s "$OUT" "$LATEST"
+
+echo "Created handoff packet:"
+echo "$OUT"
+echo
+echo "Latest symlink:"
+echo "$LATEST"

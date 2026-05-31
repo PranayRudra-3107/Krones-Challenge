@@ -49,7 +49,10 @@ sample submission rows: 4418
 |   |-- final_evaluation.ipynb
 |   |-- final_training.ipynb
 |   |-- model/
+|   |   |-- final_effnetv2_s.onnx
+|   |   |-- final_effnetv2_s.onnx.data
 |   |   `-- model_metadata.json
+|   |-- submission.csv
 |   `-- README.md
 |-- notebooks/
 |   |-- lb_convnext_small_mac.ipynb
@@ -253,8 +256,19 @@ The final artifacts are:
 
 ```text
 outputs/final_effnetv2_s/final_effnetv2_s.onnx
+outputs/final_effnetv2_s/final_effnetv2_s.onnx.data
 outputs/final_effnetv2_s/model_metadata.json
 outputs/final_effnetv2_s/final_student_summary.json
+```
+
+Current final student validation:
+
+```text
+best validation F1: 0.96361
+best epoch: 5
+threshold: 0.4050
+train rows: 31807
+valid rows: 3535
 ```
 
 Full teacher training on a 16 GB Mac can take a long time. Kaggle GPU chunk
@@ -270,6 +284,8 @@ notebook or call scripts from this repository. Use the clean final package:
 ```text
 final_submission/final_evaluation.ipynb
 final_submission/final_training.ipynb
+final_submission/model/final_effnetv2_s.onnx
+final_submission/model/final_effnetv2_s.onnx.data
 final_submission/model/model_metadata.json
 ```
 
@@ -290,7 +306,27 @@ Before final sharing, attach a Kaggle dataset/input containing:
 
 ```text
 final_effnetv2_s.onnx
+final_effnetv2_s.onnx.data
 model_metadata.json
+```
+
+The `.onnx.data` file is required because PyTorch exported the ONNX weights as
+external data next to the graph file. Keep it in the same folder as
+`final_effnetv2_s.onnx`.
+
+Local verification command:
+
+```bash
+source .venv/bin/activate
+jupyter nbconvert --execute --to notebook --inplace final_submission/final_evaluation.ipynb --ExecutePreprocessor.timeout=0
+```
+
+Verified local output:
+
+```text
+submission.csv rows: 4418
+target values: [0, 1]
+positive predictions: 2558
 ```
 
 Do not share local development controller notebooks as the final evaluation

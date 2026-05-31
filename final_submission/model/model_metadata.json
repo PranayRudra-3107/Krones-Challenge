@@ -3,7 +3,7 @@
   "model_file": "final_effnetv2_s.onnx",
   "img_size": 256,
   "batch_size": 64,
-  "threshold": 0.5,
+  "threshold": 0.4050000000000002,
   "output_activation": "sigmoid",
   "mean": [
     0.485,
@@ -22,6 +22,9 @@
   "onnx_opset": 18,
   "uses_roi_crop": true,
   "uses_bottle_type_metadata": true,
-  "training_label_source": "COCO-derived target from train_annotations.json",
-  "notes": "Replace threshold after final validation calibration. Attach final_effnetv2_s.onnx next to this metadata."
+  "training_label_source": "COCO-derived target from train_annotations.json via outputs/preprocessing/final_train.csv",
+  "teacher_distillation": "ConvNeXt Small + MaxViT Tiny soft probabilities when available",
+  "robust_noisy_label_weighting": "hard-label loss is downweighted when teacher ensemble strongly disagrees with COCO target",
+  "validation_f1": 0.9636056881176187,
+  "validation_epoch": 5
 }
