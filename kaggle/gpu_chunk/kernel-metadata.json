@@ -1,6 +1,6 @@
 {
-  "id": "pranayrudra3107/krones-v26-maxvit-p2-f0-1-2-3-4",
-  "title": "krones v26 maxvit p2 f0 1 2 3 4",
+  "id": "pranayrudra3107/krones-lb-maxvit-p2-f0-1-2-3-4",
+  "title": "krones lb maxvit p2 f0 1 2 3 4",
   "code_file": "krones_gpu_chunk.ipynb",
   "language": "python",
   "kernel_type": "notebook",
@@ -11,10 +11,11 @@
   "machine_shape": "NvidiaTeslaT4",
   "dataset_sources": [
     "pranayrudra3107/krones-challenges",
-    "pranayrudra3107/krones-metadata-files",
-    "pranayrudra3107/krones-maxvit-p1-outputs"
+    "pranayrudra3107/krones-metadata-files"
   ],
   "competition_sources": [],
-  "kernel_sources": [],
+  "kernel_sources": [
+    "pranayrudra3107/krones-lb-maxvit-p1-f0-1-2-3-4"
+  ],
   "model_sources": []
 }

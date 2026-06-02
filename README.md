@@ -647,6 +647,107 @@ When a job is complete, download completed outputs automatically:
 python scripts/kaggle_monitor.py --download-completed
 ```
 
+## Feature Distillation Continuation
+
+After the leaderboard P2 teacher jobs are downloaded, generate the continuation
+notebooks:
+
+```bash
+source .venv/bin/activate
+python scripts/make_feature_distillation_notebooks.py
+```
+
+This writes:
+
+```text
+notebooks/lb_convnext_small_feature_export.ipynb
+notebooks/lb_maxvit_feature_export.ipynb
+```
+
+Open each notebook and run all cells. They do not train the teachers again.
+They load the existing P2 fold checkpoints from:
+
+```text
+outputs/lb_convnext_small/
+outputs/lb_maxvit/
+```
+
+and export feature-distillation assets under:
+
+```text
+outputs/feature_distillation/lb_convnext_small/
+outputs/feature_distillation/lb_maxvit/
+```
+
+Main exported files per teacher:
+
+```text
+features_<tag>_p2_oof.npy
+features_<tag>_p2_test_mean.npy
+binary_logits_<tag>_p2_oof.npy
+binary_probs_<tag>_p2_oof.npy
+aux27_multitarget_<tag>.npy
+feature_distill_manifest_<tag>.json
+```
+
+Important detail: the current ConvNeXt and MaxViT checkpoints are binary
+teachers. They cannot produce true 27-way teacher logits without training a
+separate auxiliary teacher head. These notebooks therefore export real teacher
+penultimate features plus binary logits/probabilities, and COCO-derived
+auxiliary subclass/proxy targets for the 27-signal student workaround.
+
+Train an EfficientNetV2-S student from the stronger leaderboard teacher soft
+labels:
+
+```bash
+source .venv/bin/activate
+python scripts/make_teacher_soft_labels.py \
+  --teachers lb_convnext_small lb_maxvit \
+  --out-dir outputs/final_effnetv2_s_lb \
+  --phases p2 p1
+
+PYTORCH_ENABLE_MPS_FALLBACK=1 caffeinate -dimsu python -u scripts/train_final_student.py \
+  --device mps \
+  --train-csv outputs/final_effnetv2_s_lb/teacher_soft_train.csv \
+  --out-dir outputs/final_effnetv2_s_lb_mps \
+  --onnx-path outputs/final_effnetv2_s_lb_mps/final_effnetv2_s.onnx \
+  --epochs 12 \
+  --batch-size 8 \
+  --infer-batch-size 32 \
+  --num-workers 0 \
+  --img-size 256 \
+  --lr 1e-4 \
+  --distill-alpha 0.75 \
+  --btype-weight 0.10 \
+  2>&1 | tee outputs/final_effnetv2_s_lb_mps/train_mps.log
+```
+
+After both feature-export notebooks have written their `.npy` files, run the
+feature-KD version:
+
+```bash
+PYTORCH_ENABLE_MPS_FALLBACK=1 caffeinate -dimsu python -u scripts/train_final_student.py \
+  --device mps \
+  --train-csv outputs/final_effnetv2_s_lb/teacher_soft_train.csv \
+  --out-dir outputs/final_effnetv2_s_feature_kd_mps \
+  --onnx-path outputs/final_effnetv2_s_feature_kd_mps/final_effnetv2_s.onnx \
+  --feature-distill-dirs \
+    outputs/feature_distillation/lb_convnext_small \
+    outputs/feature_distillation/lb_maxvit \
+  --feature-weight 0.75 \
+  --aux27-weight 0.20 \
+  --rkd-weight 0.05 \
+  --epochs 10 \
+  --batch-size 8 \
+  --infer-batch-size 32 \
+  --num-workers 0 \
+  --img-size 256 \
+  --lr 8e-5 \
+  --distill-alpha 0.75 \
+  --btype-weight 0.10 \
+  2>&1 | tee outputs/final_effnetv2_s_feature_kd_mps/train_mps.log
+```
+
 ## COCO Preprocessing
 
 Run the COCO preprocessing/audit script before training:

@@ -137,11 +137,21 @@ def make_transforms(img_size: int) -> tuple[A.Compose, A.Compose]:
 
 
 class BottleStudentDataset(Dataset):
-    def __init__(self, df: pd.DataFrame, image_dir: Path, transform: A.Compose, img_size: int):
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        image_dir: Path,
+        transform: A.Compose,
+        img_size: int,
+        teacher_features: dict[str, np.ndarray] | None = None,
+        aux27_targets: np.ndarray | None = None,
+    ):
         self.df = df.reset_index(drop=True)
         self.image_dir = Path(image_dir)
         self.transform = transform
         self.img_size = img_size
+        self.teacher_features = teacher_features or {}
+        self.aux27_targets = aux27_targets
 
     def __len__(self) -> int:
         return len(self.df)
@@ -155,14 +165,27 @@ class BottleStudentDataset(Dataset):
         target = float(row.get("target", 0.0))
         soft = float(row.get("target_soft", target))
         btype = int(row.get("btype_id", -1))
-        return {
+        row_idx = int(row.get("row_idx", idx))
+        item = {
             "image": image,
+            "row_idx": torch.tensor(row_idx, dtype=torch.long),
             "target": torch.tensor(target, dtype=torch.float32),
             "target_soft": torch.tensor(soft, dtype=torch.float32),
             "sample_weight": torch.tensor(float(row.get("sample_weight", 1.0)), dtype=torch.float32),
             "distill_weight": torch.tensor(float(row.get("distill_weight", 0.0)), dtype=torch.float32),
             "btype": torch.tensor(btype, dtype=torch.long),
         }
+        for name, features in self.teacher_features.items():
+            item[f"teacher_feat_{name}"] = torch.tensor(
+                np.asarray(features[row_idx], dtype=np.float32),
+                dtype=torch.float32,
+            )
+        if self.aux27_targets is not None:
+            item["aux27"] = torch.tensor(
+                np.asarray(self.aux27_targets[row_idx], dtype=np.float32),
+                dtype=torch.float32,
+            )
+        return item
 
 
 class EffNetV2Student(nn.Module):
@@ -172,10 +195,13 @@ class EffNetV2Student(nn.Module):
         pretrained: bool = True,
         dropout: float = 0.25,
         btype_embed_dim: int = 8,
+        aux27_dim: int = 0,
+        feature_dims: dict[str, int] | None = None,
     ):
         super().__init__()
         self.backbone = timm.create_model(model_name, pretrained=pretrained, num_classes=0)
         features = int(self.backbone.num_features)
+        self.feature_dim = features
         self.btype_embedding = nn.Embedding(N_BOTTLE_TYPES + 1, btype_embed_dim)
         self.classifier = nn.Sequential(
             nn.Dropout(dropout),
@@ -185,20 +211,69 @@ class EffNetV2Student(nn.Module):
             nn.Linear(256, 1),
         )
         self.btype_head = nn.Linear(features, N_BOTTLE_TYPES)
+        self.aux27_head = nn.Linear(features, aux27_dim) if aux27_dim > 0 else None
+        self.feature_projectors = nn.ModuleDict()
+        for name, dim in (feature_dims or {}).items():
+            self.feature_projectors[name] = nn.Sequential(
+                nn.Linear(features, 512),
+                nn.LayerNorm(512),
+                nn.SiLU(inplace=True),
+                nn.Dropout(dropout * 0.5),
+                nn.Linear(512, int(dim)),
+            )
 
-    def forward(self, image: torch.Tensor, btype: torch.Tensor, return_btype: bool = False):
+    def forward_features(self, image: torch.Tensor) -> torch.Tensor:
         features = self.backbone(image)
+        if features.ndim == 4:
+            features = F.adaptive_avg_pool2d(features, 1).flatten(1)
+        elif features.ndim > 2:
+            features = features.flatten(1)
+        return features
+
+    def forward(
+        self,
+        image: torch.Tensor,
+        btype: torch.Tensor,
+        return_btype: bool = False,
+        return_features: bool = False,
+        return_aux27: bool = False,
+    ):
+        features = self.forward_features(image)
         btype_index = torch.clamp(btype.long(), min=-1, max=N_BOTTLE_TYPES - 1) + 1
         btype_emb = self.btype_embedding(btype_index)
         logits = self.classifier(torch.cat([features, btype_emb], dim=1)).squeeze(1)
+        outputs = [logits]
         if return_btype:
-            return logits, self.btype_head(features)
-        return logits
+            outputs.append(self.btype_head(features))
+        if return_features:
+            outputs.append(features)
+        if return_aux27:
+            outputs.append(self.aux27_head(features) if self.aux27_head is not None else None)
+        return tuple(outputs) if len(outputs) > 1 else logits
 
 
 def weighted_mean(loss: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
     denom = weight.sum().clamp_min(1e-6)
     return (loss * weight).sum() / denom
+
+
+def normalized_mse(student: torch.Tensor, teacher: torch.Tensor) -> torch.Tensor:
+    student = F.normalize(student.float(), dim=1)
+    teacher = F.normalize(teacher.float(), dim=1)
+    return F.mse_loss(student, teacher)
+
+
+def rkd_distance(student: torch.Tensor, teacher: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    if student.shape[0] < 2:
+        return student.new_tensor(0.0)
+
+    def scaled_dist(x: torch.Tensor) -> torch.Tensor:
+        dist = torch.cdist(x.float(), x.float(), p=2)
+        positive = dist[dist > eps]
+        scale = positive.mean() if positive.numel() else dist.mean().clamp_min(eps)
+        return dist / scale.clamp_min(eps)
+
+    return F.smooth_l1_loss(scaled_dist(student), scaled_dist(teacher))
 
 
 def compute_loss(
@@ -207,6 +282,9 @@ def compute_loss(
     device: torch.device,
     distill_alpha: float,
     btype_weight: float,
+    feature_weight: float = 0.0,
+    aux27_weight: float = 0.0,
+    rkd_weight: float = 0.0,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     image = batch["image"].to(device, non_blocking=True)
     target = batch["target"].to(device, non_blocking=True)
@@ -215,7 +293,13 @@ def compute_loss(
     distill_weight = batch["distill_weight"].to(device, non_blocking=True)
     btype = batch["btype"].to(device, non_blocking=True)
 
-    logits, btype_logits = model(image, btype, return_btype=True)
+    logits, btype_logits, features, aux27_logits = model(
+        image,
+        btype,
+        return_btype=True,
+        return_features=True,
+        return_aux27=True,
+    )
     hard = weighted_mean(
         F.binary_cross_entropy_with_logits(logits, target, reduction="none"),
         sample_weight,
@@ -234,11 +318,41 @@ def compute_loss(
     else:
         aux = logits.new_tensor(0.0)
 
-    loss = hard + distill_alpha * soft + btype_weight * aux
+    feature_losses = []
+    rkd_losses = []
+    for name, projector in getattr(model, "feature_projectors", {}).items():
+        key = f"teacher_feat_{name}"
+        if key not in batch:
+            continue
+        teacher_feat = batch[key].to(device, non_blocking=True)
+        projected = projector(features)
+        feature_losses.append(normalized_mse(projected, teacher_feat))
+        if rkd_weight > 0:
+            rkd_losses.append(rkd_distance(projected, teacher_feat))
+    feat = torch.stack(feature_losses).mean() if feature_losses else logits.new_tensor(0.0)
+    rkd = torch.stack(rkd_losses).mean() if rkd_losses else logits.new_tensor(0.0)
+
+    if aux27_logits is not None and "aux27" in batch:
+        aux27_target = batch["aux27"].to(device, non_blocking=True)
+        aux27 = F.binary_cross_entropy_with_logits(aux27_logits, aux27_target)
+    else:
+        aux27 = logits.new_tensor(0.0)
+
+    loss = (
+        hard
+        + distill_alpha * soft
+        + btype_weight * aux
+        + feature_weight * feat
+        + aux27_weight * aux27
+        + rkd_weight * rkd
+    )
     metrics = {
         "hard": float(hard.detach().cpu()),
         "soft": float(soft.detach().cpu()),
         "btype": float(aux.detach().cpu()),
+        "feat": float(feat.detach().cpu()),
+        "aux27": float(aux27.detach().cpu()),
+        "rkd": float(rkd.detach().cpu()),
     }
     return loss, metrics
 
@@ -286,6 +400,72 @@ def split_train_valid(df: pd.DataFrame, valid_fraction: float, seed: int) -> tup
     return df.iloc[train_idx].reset_index(drop=True), df.iloc[valid_idx].reset_index(drop=True)
 
 
+def safe_feature_name(tag: str) -> str:
+    return "".join(ch if ch.isalnum() else "_" for ch in tag)
+
+
+def load_feature_distillation_assets(
+    feature_dirs: list[Path],
+    phase: str,
+    n_rows: int,
+) -> tuple[dict[str, np.ndarray], np.ndarray | None, dict]:
+    teacher_features: dict[str, np.ndarray] = {}
+    aux27_targets = None
+    manifest = {"phase": phase, "teachers": [], "aux27": None}
+
+    for feature_dir in feature_dirs:
+        feature_dir = Path(feature_dir)
+        tag = feature_dir.name
+        feature_path = feature_dir / f"features_{tag}_{phase}_oof.npy"
+        if not feature_path.exists():
+            raise FileNotFoundError(
+                f"Missing feature export {feature_path}. Run notebooks/{tag}_feature_export.ipynb first."
+            )
+        features = np.load(feature_path).astype(np.float32)
+        if len(features) != n_rows:
+            raise ValueError(f"{feature_path} has {len(features)} rows, expected {n_rows}.")
+        key = safe_feature_name(tag)
+        teacher_features[key] = features
+        manifest["teachers"].append({
+            "tag": tag,
+            "key": key,
+            "path": str(feature_path),
+            "shape": list(features.shape),
+        })
+
+        aux_path = feature_dir / f"aux27_multitarget_{tag}.npy"
+        if aux27_targets is None and aux_path.exists():
+            aux27_targets = np.load(aux_path).astype(np.float32)
+            if len(aux27_targets) != n_rows:
+                raise ValueError(f"{aux_path} has {len(aux27_targets)} rows, expected {n_rows}.")
+            manifest["aux27"] = {
+                "tag": tag,
+                "path": str(aux_path),
+                "shape": list(aux27_targets.shape),
+            }
+
+    return teacher_features, aux27_targets, manifest
+
+
+def load_warm_start(model: nn.Module, checkpoint_path: Path) -> None:
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    state = checkpoint.get("model", checkpoint)
+    missing, unexpected = model.load_state_dict(state, strict=False)
+    critical_missing = [
+        key for key in missing
+        if key.startswith(("backbone.", "classifier.", "btype_embedding.", "btype_head."))
+    ]
+    if critical_missing:
+        raise RuntimeError(f"Warm start missing critical keys: {critical_missing[:20]}")
+    harmless = [
+        key for key in unexpected
+        if key.startswith(("aux27_head.", "feature_projectors."))
+    ]
+    unexpected_bad = [key for key in unexpected if key not in harmless]
+    if unexpected_bad:
+        raise RuntimeError(f"Warm start unexpected keys: {unexpected_bad[:20]}")
+
+
 def train(args: argparse.Namespace) -> dict:
     seed_everything(args.seed)
     data_dir = Path(args.data_dir) if args.data_dir else find_data_dir()
@@ -294,6 +474,7 @@ def train(args: argparse.Namespace) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     df = pd.read_csv(train_csv)
+    df["row_idx"] = np.arange(len(df), dtype=np.int64)
     if args.max_train_rows and args.max_train_rows < len(df):
         df = df.sample(args.max_train_rows, random_state=args.seed).reset_index(drop=True)
     if "target_soft" not in df.columns:
@@ -304,10 +485,33 @@ def train(args: argparse.Namespace) -> dict:
         df["distill_weight"] = 0.0
     df["btype_id"] = df["btype_id"].fillna(-1).astype(int)
 
+    feature_dirs = [Path(p) for p in args.feature_distill_dirs]
+    teacher_features, aux27_targets, feature_manifest = load_feature_distillation_assets(
+        feature_dirs,
+        args.feature_phase,
+        len(df),
+    ) if feature_dirs else ({}, None, {"phase": args.feature_phase, "teachers": [], "aux27": None})
+    feature_dims = {name: int(values.shape[1]) for name, values in teacher_features.items()}
+    aux27_dim = int(aux27_targets.shape[1]) if aux27_targets is not None else 0
+
     train_df, valid_df = split_train_valid(df, args.valid_fraction, args.seed)
     train_tf, valid_tf = make_transforms(args.img_size)
-    train_ds = BottleStudentDataset(train_df, data_dir / "train_images", train_tf, args.img_size)
-    valid_ds = BottleStudentDataset(valid_df, data_dir / "train_images", valid_tf, args.img_size)
+    train_ds = BottleStudentDataset(
+        train_df,
+        data_dir / "train_images",
+        train_tf,
+        args.img_size,
+        teacher_features=teacher_features,
+        aux27_targets=aux27_targets,
+    )
+    valid_ds = BottleStudentDataset(
+        valid_df,
+        data_dir / "train_images",
+        valid_tf,
+        args.img_size,
+        teacher_features=teacher_features,
+        aux27_targets=aux27_targets,
+    )
 
     pin_memory = torch.cuda.is_available()
     train_loader = DataLoader(
@@ -327,7 +531,15 @@ def train(args: argparse.Namespace) -> dict:
     )
 
     device = choose_device(args.device)
-    model = EffNetV2Student(pretrained=not args.no_pretrained, dropout=args.dropout).to(device)
+    model = EffNetV2Student(
+        pretrained=not args.no_pretrained,
+        dropout=args.dropout,
+        aux27_dim=aux27_dim,
+        feature_dims=feature_dims,
+    ).to(device)
+    if args.warm_start_checkpoint:
+        load_warm_start(model, Path(args.warm_start_checkpoint))
+        print(f"warm_start_checkpoint: {args.warm_start_checkpoint}")
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
@@ -344,6 +556,8 @@ def train(args: argparse.Namespace) -> dict:
     print(f"train_csv: {train_csv}")
     print(f"device: {device}")
     print(f"train/valid: {len(train_df)}/{len(valid_df)}")
+    print(f"feature_distill_teachers: {list(feature_dims.keys()) or 'none'}")
+    print(f"aux27_dim: {aux27_dim}")
 
     for epoch in range(args.epochs):
         epoch_started = time.time()
@@ -359,6 +573,9 @@ def train(args: argparse.Namespace) -> dict:
                     device,
                     distill_alpha=args.distill_alpha,
                     btype_weight=args.btype_weight,
+                    feature_weight=args.feature_weight,
+                    aux27_weight=args.aux27_weight,
+                    rkd_weight=args.rkd_weight,
                 )
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
@@ -372,6 +589,7 @@ def train(args: argparse.Namespace) -> dict:
                 loss=f"{np.mean(running[-50:]):.4f}",
                 hard=f"{parts['hard']:.4f}",
                 soft=f"{parts['soft']:.4f}",
+                feat=f"{parts['feat']:.4f}",
             )
 
         val_loss, threshold, val_f1, y_true, probs = evaluate(model, valid_loader, device)
@@ -398,6 +616,8 @@ def train(args: argparse.Namespace) -> dict:
                     "std": STD,
                     "uses_bottle_type_metadata": True,
                     "uses_roi_crop": True,
+                    "feature_distillation": feature_manifest,
+                    "aux27_dim": aux27_dim,
                 },
                 best_path,
             )
@@ -417,6 +637,8 @@ def train(args: argparse.Namespace) -> dict:
         "minutes": total_minutes,
         "train_rows": int(len(train_df)),
         "valid_rows": int(len(valid_df)),
+        "feature_distillation": feature_manifest,
+        "aux27_dim": aux27_dim,
     }
     (out_dir / "final_student_summary.json").write_text(json.dumps(summary, indent=2))
     print(f"finished in {total_minutes:.1f} min")
@@ -431,7 +653,17 @@ def export_onnx(checkpoint_path: Path, onnx_path: Path, img_size: int) -> Path:
     onnx_path.parent.mkdir(parents=True, exist_ok=True)
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     model = EffNetV2Student(pretrained=False)
-    model.load_state_dict(checkpoint["model"], strict=True)
+    state = checkpoint["model"]
+    base_state = model.state_dict()
+    filtered = {
+        key: value
+        for key, value in state.items()
+        if key in base_state and tuple(base_state[key].shape) == tuple(value.shape)
+    }
+    missing = [key for key in base_state if key not in filtered]
+    if missing:
+        raise RuntimeError(f"Cannot export ONNX; missing base model keys: {missing[:20]}")
+    model.load_state_dict(filtered, strict=True)
     model.eval()
     dummy_image = torch.randn(1, 3, img_size, img_size, dtype=torch.float32)
     dummy_btype = torch.zeros(1, dtype=torch.long)
@@ -468,6 +700,10 @@ def write_metadata(out_dir: Path, onnx_path: Path, best: dict, args: argparse.Na
         "training_label_source": "COCO-derived target from train_annotations.json via outputs/preprocessing/final_train.csv",
         "teacher_distillation": "ConvNeXt Small + MaxViT Tiny soft probabilities when available",
         "robust_noisy_label_weighting": "hard-label loss is downweighted when teacher ensemble strongly disagrees with COCO target",
+        "feature_distillation_dirs": [str(p) for p in getattr(args, "feature_distill_dirs", [])],
+        "feature_weight": float(getattr(args, "feature_weight", 0.0)),
+        "aux27_weight": float(getattr(args, "aux27_weight", 0.0)),
+        "rkd_weight": float(getattr(args, "rkd_weight", 0.0)),
         "validation_f1": float(best.get("f1", -1.0)),
         "validation_epoch": int(best.get("epoch", -1)),
     }
@@ -494,6 +730,12 @@ def main() -> int:
     parser.add_argument("--valid-fraction", type=float, default=0.10)
     parser.add_argument("--distill-alpha", type=float, default=0.50)
     parser.add_argument("--btype-weight", type=float, default=0.10)
+    parser.add_argument("--feature-distill-dirs", nargs="*", type=Path, default=[])
+    parser.add_argument("--feature-phase", type=str, default="p2")
+    parser.add_argument("--feature-weight", type=float, default=0.0)
+    parser.add_argument("--aux27-weight", type=float, default=0.0)
+    parser.add_argument("--rkd-weight", type=float, default=0.0)
+    parser.add_argument("--warm-start-checkpoint", type=Path, default=None)
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)

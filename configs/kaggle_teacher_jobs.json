@@ -1,6 +1,42 @@
 {
   "jobs": [
     {
+      "name": "Leaderboard ConvNeXt Small P1 all folds",
+      "model": "lb_convnext_small",
+      "phase": "p1",
+      "folds": [0, 1, 2, 3, 4],
+      "ref": "pranayrudra3107/krones-lb-convnext-small-p1-f0-1-2-3-4",
+      "output_dir": "outputs/kaggle_runs/pranayrudra3107_lb_convnext_small_p1_all",
+      "notes": "Leaderboard-mode P1 all folds using private Krones_Challenges + metadata datasets on T4."
+    },
+    {
+      "name": "Leaderboard MaxViT Tiny P1 all folds",
+      "model": "lb_maxvit",
+      "phase": "p1",
+      "folds": [0, 1, 2, 3, 4],
+      "ref": "pranayrudra3107/krones-lb-maxvit-p1-f0-1-2-3-4",
+      "output_dir": "outputs/kaggle_runs/pranayrudra3107_lb_maxvit_p1_all",
+      "notes": "Leaderboard-mode P1 all folds using private Krones_Challenges + metadata datasets on T4."
+    },
+    {
+      "name": "Leaderboard ConvNeXt Small P2 all folds",
+      "model": "lb_convnext_small",
+      "phase": "p2",
+      "folds": [0, 1, 2, 3, 4],
+      "ref": "pranayrudra3107/krones-lb-convnext-small-p2-f0-1-2-3-4",
+      "output_dir": "outputs/kaggle_runs/pranayrudra3107_lb_convnext_small_p2_all",
+      "notes": "Leaderboard-mode P2 all folds resuming from pranayrudra3107/krones-lb-convnext-small-p1-f0-1-2-3-4."
+    },
+    {
+      "name": "Leaderboard MaxViT Tiny P2 all folds",
+      "model": "lb_maxvit",
+      "phase": "p2",
+      "folds": [0, 1, 2, 3, 4],
+      "ref": "pranayrudra3107/krones-lb-maxvit-p2-f0-1-2-3-4",
+      "output_dir": "outputs/kaggle_runs/pranayrudra3107_lb_maxvit_p2_all",
+      "notes": "Leaderboard-mode P2 all folds resuming from pranayrudra3107/krones-lb-maxvit-p1-f0-1-2-3-4."
+    },
+    {
       "name": "ConvNeXt Small P2 all folds",
       "model": "v26_convnext_small",
       "phase": "p2",
