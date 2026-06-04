@@ -748,6 +748,36 @@ PYTORCH_ENABLE_MPS_FALLBACK=1 caffeinate -dimsu python -u scripts/train_final_st
   2>&1 | tee outputs/final_effnetv2_s_feature_kd_mps/train_mps.log
 ```
 
+For a stronger CSV-only attempt, train five warm-start EfficientNetV2-S folds
+and average their ONNX predictions:
+
+```bash
+source .venv/bin/activate
+scripts/train_effnetv2_lb_folds_mps.sh
+```
+
+The script writes fold checkpoints under:
+
+```text
+outputs/final_effnetv2_s_lb_5fold_mps/fold0/
+outputs/final_effnetv2_s_lb_5fold_mps/fold1/
+outputs/final_effnetv2_s_lb_5fold_mps/fold2/
+outputs/final_effnetv2_s_lb_5fold_mps/fold3/
+outputs/final_effnetv2_s_lb_5fold_mps/fold4/
+```
+
+and ensemble submissions under:
+
+```text
+outputs/final_effnetv2_s_lb_5fold_mps/ensemble/
+```
+
+This is a pragmatic public-score attempt: it warm-starts each fold from the best
+LB-teacher student checkpoint, then uses the fold diversity for test-time
+averaging. Because the warm-start checkpoint has already seen a broad train
+split, do not treat the fold validation scores as perfectly clean OOF estimates;
+use the public leaderboard and threshold sweep to judge the ensemble.
+
 ## COCO Preprocessing
 
 Run the COCO preprocessing/audit script before training:

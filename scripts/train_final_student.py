@@ -18,7 +18,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from albumentations.pytorch import ToTensorV2
 from sklearn.metrics import f1_score
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import StratifiedKFold, train_test_split
 from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
 
@@ -145,9 +145,11 @@ class BottleStudentDataset(Dataset):
         img_size: int,
         teacher_features: dict[str, np.ndarray] | None = None,
         aux27_targets: np.ndarray | None = None,
+        test_image_dir: Path | None = None,
     ):
         self.df = df.reset_index(drop=True)
         self.image_dir = Path(image_dir)
+        self.test_image_dir = Path(test_image_dir) if test_image_dir is not None else None
         self.transform = transform
         self.img_size = img_size
         self.teacher_features = teacher_features or {}
@@ -158,7 +160,11 @@ class BottleStudentDataset(Dataset):
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         row = self.df.iloc[idx]
-        image = read_image(self.image_dir, str(row["image_id"]), self.img_size)
+        image_source = str(row.get("image_source", "train")).lower()
+        image_dir = self.image_dir
+        if image_source == "test" and self.test_image_dir is not None:
+            image_dir = self.test_image_dir
+        image = read_image(image_dir, str(row["image_id"]), self.img_size)
         image = crop_roi(image, row)
         image = self.transform(image=image)["image"]
 
@@ -389,15 +395,46 @@ def evaluate(
     return float(np.mean(losses) if losses else math.nan), threshold, score, targets_np, probs_np
 
 
+def pseudo_mask(df: pd.DataFrame) -> pd.Series:
+    if "is_pseudo" not in df.columns:
+        return pd.Series(False, index=df.index)
+    values = df["is_pseudo"].fillna(False)
+    if values.dtype == object:
+        return values.astype(str).str.lower().isin({"1", "true", "yes", "y"})
+    return values.astype(bool)
+
+
 def split_train_valid(df: pd.DataFrame, valid_fraction: float, seed: int) -> tuple[pd.DataFrame, pd.DataFrame]:
-    strat = (df["btype_id"].fillna(-1).clip(lower=-1).astype(int) + 1) * 2 + df["target"].astype(int)
+    is_pseudo = pseudo_mask(df)
+    real_df = df[~is_pseudo].copy()
+    pseudo_df = df[is_pseudo].copy()
+    strat = (real_df["btype_id"].fillna(-1).clip(lower=-1).astype(int) + 1) * 2 + real_df["target"].astype(int)
     train_idx, valid_idx = train_test_split(
-        np.arange(len(df)),
+        np.arange(len(real_df)),
         test_size=valid_fraction,
         random_state=seed,
         stratify=strat,
     )
-    return df.iloc[train_idx].reset_index(drop=True), df.iloc[valid_idx].reset_index(drop=True)
+    train_df = real_df.iloc[train_idx].copy()
+    if len(pseudo_df):
+        train_df = pd.concat([train_df, pseudo_df], ignore_index=True)
+    return train_df.reset_index(drop=True), real_df.iloc[valid_idx].reset_index(drop=True)
+
+
+def split_train_valid_fold(df: pd.DataFrame, n_folds: int, fold: int, seed: int) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if fold < 0 or fold >= n_folds:
+        raise ValueError(f"fold must be in [0, {n_folds - 1}], got {fold}")
+    is_pseudo = pseudo_mask(df)
+    real_df = df[~is_pseudo].copy()
+    pseudo_df = df[is_pseudo].copy()
+    strat = (real_df["btype_id"].fillna(-1).clip(lower=-1).astype(int) + 1) * 2 + real_df["target"].astype(int)
+    skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=seed)
+    splits = list(skf.split(np.arange(len(real_df)), strat))
+    train_idx, valid_idx = splits[fold]
+    train_df = real_df.iloc[train_idx].copy()
+    if len(pseudo_df):
+        train_df = pd.concat([train_df, pseudo_df], ignore_index=True)
+    return train_df.reset_index(drop=True), real_df.iloc[valid_idx].reset_index(drop=True)
 
 
 def safe_feature_name(tag: str) -> str:
@@ -494,7 +531,10 @@ def train(args: argparse.Namespace) -> dict:
     feature_dims = {name: int(values.shape[1]) for name, values in teacher_features.items()}
     aux27_dim = int(aux27_targets.shape[1]) if aux27_targets is not None else 0
 
-    train_df, valid_df = split_train_valid(df, args.valid_fraction, args.seed)
+    if args.fold is None:
+        train_df, valid_df = split_train_valid(df, args.valid_fraction, args.seed)
+    else:
+        train_df, valid_df = split_train_valid_fold(df, args.n_folds, args.fold, args.seed)
     train_tf, valid_tf = make_transforms(args.img_size)
     train_ds = BottleStudentDataset(
         train_df,
@@ -503,6 +543,7 @@ def train(args: argparse.Namespace) -> dict:
         args.img_size,
         teacher_features=teacher_features,
         aux27_targets=aux27_targets,
+        test_image_dir=data_dir / "test_images",
     )
     valid_ds = BottleStudentDataset(
         valid_df,
@@ -511,6 +552,7 @@ def train(args: argparse.Namespace) -> dict:
         args.img_size,
         teacher_features=teacher_features,
         aux27_targets=aux27_targets,
+        test_image_dir=data_dir / "test_images",
     )
 
     pin_memory = torch.cuda.is_available()
@@ -556,8 +598,13 @@ def train(args: argparse.Namespace) -> dict:
     print(f"train_csv: {train_csv}")
     print(f"device: {device}")
     print(f"train/valid: {len(train_df)}/{len(valid_df)}")
+    if args.fold is not None:
+        print(f"fold: {args.fold}/{args.n_folds}")
     print(f"feature_distill_teachers: {list(feature_dims.keys()) or 'none'}")
     print(f"aux27_dim: {aux27_dim}")
+
+    np.save(out_dir / "train_row_idx.npy", train_df["row_idx"].to_numpy(dtype=np.int64))
+    np.save(out_dir / "valid_row_idx.npy", valid_df["row_idx"].to_numpy(dtype=np.int64))
 
     for epoch in range(args.epochs):
         epoch_started = time.time()
@@ -637,6 +684,8 @@ def train(args: argparse.Namespace) -> dict:
         "minutes": total_minutes,
         "train_rows": int(len(train_df)),
         "valid_rows": int(len(valid_df)),
+        "fold": None if args.fold is None else int(args.fold),
+        "n_folds": None if args.fold is None else int(args.n_folds),
         "feature_distillation": feature_manifest,
         "aux27_dim": aux27_dim,
     }
@@ -740,6 +789,8 @@ def main() -> int:
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", type=str, default=None)
+    parser.add_argument("--fold", type=int, default=None)
+    parser.add_argument("--n-folds", type=int, default=5)
     parser.add_argument("--no-pretrained", action="store_true")
     parser.add_argument("--disable-amp", action="store_true")
     parser.add_argument("--max-train-rows", type=int, default=None)
