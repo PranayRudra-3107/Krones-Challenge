@@ -1,0 +1,17 @@
+# Artifact Manifest
+
+- CHAT_CONTEXT.md (4.0K)
+- MANIFEST.md (4.0K)
+- artifacts/final_submission/model/final_effnetv2_s.onnx (1.3M)
+- artifacts/final_submission/model/final_effnetv2_s.onnx.data (78M)
+- artifacts/final_submission/model/model_metadata.json (4.0K)
+- artifacts/final_submission/submission.csv (244K)
+- project/README.md (24K)
+- project/configs/final_strategy.json (4.0K)
+- project/final_submission/README.md (4.0K)
+- project/final_submission/final_evaluation.ipynb (24K)
+- project/final_submission/model/model_metadata.json (4.0K)
+- project/outputs/final_effnetv2_s/final_student_summary.json (4.0K)
+- project/outputs/final_effnetv2_s/teacher_soft_summary.json (4.0K)
+- project/outputs/preprocessing/preprocessing_summary.json (4.0K)
+- status/PROJECT_STATUS.md (4.0K)

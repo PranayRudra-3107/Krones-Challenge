@@ -1,0 +1,34 @@
+{
+  "model_name": "tf_efficientnetv2_s.in21k_ft_in1k",
+  "model_file": "final_effnetv2_s.onnx",
+  "img_size": 256,
+  "batch_size": 32,
+  "threshold": 0.5300000000000002,
+  "output_activation": "sigmoid",
+  "mean": [
+    0.485,
+    0.456,
+    0.406
+  ],
+  "std": [
+    0.229,
+    0.224,
+    0.225
+  ],
+  "input_names": [
+    "image",
+    "btype_id"
+  ],
+  "onnx_opset": 18,
+  "uses_roi_crop": true,
+  "uses_bottle_type_metadata": true,
+  "training_label_source": "COCO-derived target from train_annotations.json via outputs/preprocessing/final_train.csv",
+  "teacher_distillation": "ConvNeXt Small + MaxViT Tiny soft probabilities when available",
+  "robust_noisy_label_weighting": "hard-label loss is downweighted when teacher ensemble strongly disagrees with COCO target",
+  "feature_distillation_dirs": [],
+  "feature_weight": 0.0,
+  "aux27_weight": 0.0,
+  "rkd_weight": 0.0,
+  "validation_f1": 0.9619445126442425,
+  "validation_epoch": 7
+}
